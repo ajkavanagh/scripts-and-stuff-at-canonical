@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Sync files back from the device from the current directory.
+# The target directory must be $HOME/Projects/Canonical or $HOME/Projects/Personal.
+# that part of the directory is stripped off.
+# That part is stripped off and the the target is synced back (without deleting files)
+# first a dry run is done to show the files.
+# The remote directory must exist.
+# Then the remote directory is made and attempted to be synced to.
+
+set -x
+
+_script=$( basename $0 )
+_pwd=$(pwd)
+
+# Strip directories
+strip_dirs=($HOME/Projects/Canonical $HOME/Projects/Personal)
+
+SSH_OPTIONS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+function usage {
+        printf "\nCopy the CURRENT directory FROM the remote machine to roughly the same place here.\n"
+        printf "\nUSAGE:\n\n$_script [-h|--help]\n"
+	printf "$_script {IP|name} [-n]\n"
+        printf "\nThis rsyncs the CURRENT directory FROM the machine specified in the option.\n"
+        printf "Note that it should be possible to ssh into the machine by just typeing\n"
+        printf "'ssh machine' .. i.e. all the necessary stuff should be in \$HOME/.ssh/config\n"
+        printf "\n\nwhere:\n"
+        printf " -h | --help     : this usage page\n"
+	printf " {IP|name}       : the machine to copy to\n"
+	printf " [-n]            : exclude .git -- usually it isn't."
+}
+
+# check options
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        usage
+        exit 0
+fi
+
+if [[ -z $1 ]]; then
+        usage
+        echo "ERROR! Need to supply the server name"
+        exit 1
+fi
+SERVER=${1}
+
+unset _exclude
+if [[ "$2" == "-n" ]]; then
+	_exclude="--exclude .git"
+fi
+
+unset _target
+for p in ${strip_dirs[@]}; do
+	if [[ $_pwd == $p* ]]; then
+		_target=${_pwd/#$p/\.}
+		break
+	fi
+done
+if [[ -z $_target ]]; then
+	echo "$_pwd is NOT in any of the syncable dirs."
+	echo "${strip_dirs[@]}"
+	usage
+	exit 1
+fi
+
+ check if the target exists
+ssh $SSH_OPTIONS $SERVER '[ -d $_target ]'
+if [[ "$?" == "1" ]]; then
+	echo "Target '$_target' doesn't exist"
+	exit 1
+fi
+
+# do a dry-run rsync to show the files.
+#rsync --dry-run -avz -e "ssh $SSH_OPTIONS" ${_exclude} --progress ${SERVER}:${_target}/ ${_pwd}
+
+
+# Now sync the files across from $_pwd to $SERVER:$_target
+ssh $SSH_OPTIONS $SERVER mkdir -p ${_target}
+set -x
+rsync -avz -e "ssh $SSH_OPTIONS" ${_exclude} --progress --delete ${SERVER}:${_target}/ ${_pwd}
+
+# vim: filetype=sh :

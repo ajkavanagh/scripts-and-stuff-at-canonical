@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+
+# Sync files to an LXD container from the current directory.
+# If the initial directory is $HOME/Projects/Canonical or $HOME/Projects/Personal then
+# that part of the directory is stripped off.
+# Then the remote directory is made and attempted to be synced to.
+
+set -o errexit -o pipefail -o noclobber -o nounset
+
+# -allow a command to fail with !’s side effect on errexit
+# -use return value from ${PIPESTATUS[0]}, because ! hosed $?
+! getopt --test > /dev/null 
+if [[ ${PIPESTATUS[0]} -ne 4 ]]; then
+    echo 'I’m sorry, `getopt --test` failed in this environment.'
+    exit 1
+fi
+
+_script=$( basename $0 )
+_pwd=$(pwd)
+
+# Strip directories
+strip_dirs=($HOME/Projects/Canonical $HOME/Projects/Personal)
+
+SSH_OPTIONS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+function usage {
+    printf "\nCopy the CURRENT directory to an LXD container in roughly the same place.\n"
+    printf "This script copies the current directory to a directory on the LXD container\n"
+    printf "But also strips a set of prefixs from directory.  One of these prefixs has to\n"
+    printf "be present, otherwise the command doesn't do anything.  Prefixes are:\n\n"
+
+    for p in ${strip_dirs[@]}; do
+        echo "$p"
+    done
+
+    printf "\nUSAGE:\n\n$_script [-h|--help]\n"
+    printf "$_script [OPTIONS] [NAME]\n"
+    printf "\nThis uses 'lxd file push' the CURRENT directory TO the LXD container specified in the option.\n"
+    printf "Note that it should be possible to copy files into the LXD container by just typeing\n"
+    printf "'lxc file push ' .. i.e. all the necessary permissions should already exist.\n"
+    printf "\n\nwhere OPTIONS are:\n\n"
+    printf " -h|--help           : this usage page\n"
+    printf " -n|--exclude-git    : exclude .git -- usually it isn't.\n"
+    printf " -d|--delete         : delete files at target not in source.\n"
+    printf " -t TARGET_DIR\n"
+    printf " --target=TARGET_DIR : the directory at the target to copy into\n"
+    printf " -c|--strip-charm    : strip 'charm-' off the local directory and copy to that\n"
+    printf "\nand:\n\n"
+    printf " NAME                : the LXD container to copy in to\n"
+    printf "\nNote that -t and -c options are exclusionary; either specify the target dir\n"
+    printf "or strip the charm- but don't do both.\n"
+}
+
+OPTIONS=nht:cd
+LONGOPTS=ignore-git,help,target:,strip-charm,delete
+
+# -regarding ! and PIPESTATUS see above
+# -temporarily store output to be able to check for errors
+# -activate quoting/enhanced mode (e.g. by writing out “--options”)
+# -pass arguments only via   -- "$@"   to separate them correctly
+! PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@")
+if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    # e.g. return value is 1
+    #  then getopt has complained about wrong arguments to stdout
+    usage
+    exit 2
+fi
+# read getopt’s output this way to handle the quoting right:
+eval set -- "$PARSED"
+
+_exclude=
+TARGET=
+_strip_charm=
+_delete=
+unset SERVER
+unset _server_target
+unset _target
+
+# now read the options in order until we see the --
+while true; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -n|--ignore-git)
+            _exclude="--exclude .git"
+            shift
+            ;;
+        -t|--target)
+            TARGET="$2"
+            shift 2
+            ;;
+        -c|--strip-charm)
+            _strip_charm=y
+            shift
+            ;;
+        -d|--delete)
+            _delete=y
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Programming error!"
+            exit 3
+            ;;
+    esac
+done
+
+# determine whether to strip the charm or use the target or neither
+if [ -n "${TARGET}" -a -n "${_strip_charm}" ]; then
+    usage
+    printf "\n\n"
+    echo "ERROR - Only set -c or -t TARGET; not both!"
+    exit 4
+fi
+
+# handle non-option arguments
+if [[ $# -gt 1 ]]; then
+    usage
+    printf "\n\n"
+    echo "ERROR - $0: Only one arguments maximum!!"
+    exit 4
+fi
+
+if [[ $# -eq 0 ]]; then
+    usage
+    printf "\n\n"
+    echo "ERROR - Need to supply an LXD container name to copy into"
+    exit 4
+else
+    SERVER=${1}
+fi
+
+#unset _target
+_target=
+for p in ${strip_dirs[@]}; do
+	if [[ $_pwd == $p* ]]; then
+		_target=${_pwd/#$p/\.}
+		break
+	fi
+done
+
+if [[ -z $_target ]]; then
+	usage
+    printf "\n\n"
+	echo "ERROR - $_pwd is NOT in any of the syncable dirs."
+	echo "${strip_dirs[@]}"
+	exit 1
+fi
+
+if [ -n "${_strip_charm}" ]; then
+    # check the basename starts with charm-
+    _name=$(basename ${_pwd})
+    if [[ $_name == charm-* ]]; then
+        TARGET=${_name#"charm-"}
+        _path=$(dirname $_target)
+        _server_target="$_path/$TARGET"
+    else
+        echo "-c|--strip-charm option used but '$_name' doesn't start with 'charm-'"
+        exit 1
+    fi
+elif [[ -z $TARGET ]]; then
+    _server_target=${_target}
+else
+    _path=$(dirname $_target)
+    _server_target="$_path/$TARGET"
+fi
+
+echo "_exclude ${_exclude}"
+echo "SERVER ${SERVER}"
+echo "TARGET ${TARGET}"
+echo "_target ${_target}"
+echo "_server_target ${_server_target}"
+
+#FAKE_RSYNC_SSH="$HOME/bin/fake-rsync-ssh-helper"
+FAKE_RSYNC_SSH=$(which fake-rsync-ssh-helper)
+if [[ -z "$FAKE_RSYNC_SSH" ]]; then
+    printf "\n\n\nERROR - 'fake-rsync-ssh-helper' helper for rsync into LXD container is missing"
+    exit 4
+fi
+
+# first make the file in the target container
+set -x
+lxc exec $SERVER -- mkdir -p "/home/ubuntu/${_server_target}"
+
+# Now sync the files across from $_pwd to $SERVER:$_target
+if [ -n "${_delete}" ]; then
+    set -x
+    #rsync -avz -e "ssh $SSH_OPTIONS" ${_exclude} --delete --progress ${_pwd}/ ${SERVER}:${_server_target}
+    rsync -avz -e $FAKE_RSYNC_SSH --delete --progress ${_pwd}/ ${SERVER}:/home/ubuntu/${_server_target}
+else
+    set -x
+    #rsync -avz -e "ssh $SSH_OPTIONS" ${_exclude} --progress ${_pwd}/ ${SERVER}:${_server_target}
+    rsync -avz -e $FAKE_RSYNC_SSH ${_exclude} --progress ${_pwd}/ ${SERVER}:/home/ubuntu/${_server_target}
+fi
+
+# vim: filetype=sh tabstop=4 softtabstop=4 shiftwidth=4 textwidth=120 expandtab autoindent :

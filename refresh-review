@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# refresh the review using the change ID from the last commit.
+# Only works if there are no changes
+# run in the git repository
+
+git_status="$(git status -s)"
+if [[ -n "$git_status" ]]; then
+    echo "Git repository is dirty; exiting."
+    exit 0
+fi
+
+_dir=$(pwd)
+# verify that the branch isn't master
+branch=$(git branch --show-current | tr -d '\n')
+if [[ "$branch" == "master" ]];
+then
+    echo "Branch is ${_dir}"
+    echo "Branch is master - not updating."
+    exit 0
+fi
+
+# find the commit id
+change_id=$(git last | grep "Change-Id: " | awk '{print $2}')
+echo "Change id is $change_id"
+git review -d $change_id
